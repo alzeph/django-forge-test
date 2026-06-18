@@ -1,6 +1,6 @@
 [project]
 name = "django-forge-test"
-version = "0.6.0"
+version = "0.7.0"
 description = "Génération de fixtures et tests d'API auto-générés pour Django."
 readme = "README.md"
 license = "AGPL-3.0-or-later"
