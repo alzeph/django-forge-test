@@ -127,7 +127,10 @@ class ForgeCase(TestCase):
         if not isinstance(test, dict):
             raise TypeError("each test must be a dict")
         if "fixture" in test:
-            cls._validate_fixture_entry(test["fixture"])
+            raw = test["fixture"]
+            fixtures = raw if isinstance(raw, list) else [raw]
+            for fixture in fixtures:
+                cls._validate_fixture_entry(fixture)
 
     @classmethod
     def _validate_fixture_entry(cls, fixture: Any) -> None:
@@ -239,15 +242,47 @@ class ForgeCase(TestCase):
         setattr(self, fixture["object_name"], instance)
         return instance
 
+    def _resolve_fixtures(self, raw: Union[Fixture, List[Fixture]]) -> None:
+        """
+        Résout une fixture ou une liste de fixtures.
+        Chaque fixture est créée dans l'ordre et stockée sous self.<object_name>.
+        """
+        fixtures = raw if isinstance(raw, list) else [raw]
+        for fixture in fixtures:
+            self._resolve_fixture_instance(fixture)
+
     # ------------------------------------------------------------------
     # HTTP request
     # ------------------------------------------------------------------
 
     def _extract_request_data(self, http_params: HTTPClientParams) -> Optional[Dict[str, Any]]:
-        fixture_json = http_params.pop("fixture", None)
-        if fixture_json is None:
+        """
+        Extrait et résout les données à envoyer dans la requête.
+
+        fixture peut être :
+          - absent                 -> None (pas de body)
+          - un dict FixtureJson    -> body résolu depuis ce seul fixture
+          - une liste de FixtureJson -> bodies résolus puis fusionnés dans l'ordre
+                                       (les clés des derniers écrasent les premières)
+        """
+        raw = http_params.pop("fixture", None)
+        if raw is None:
             return None
-        return self._resolve_fixture_json_data(fixture_json)
+        fixtures = raw if isinstance(raw, list) else [raw]
+        return self._merge_fixture_json_list(fixtures)
+
+    def _merge_fixture_json_list(self, fixtures: list) -> Dict[str, Any]:
+        """Résout chaque FixtureJson et fusionne les dicts dans l'ordre."""
+        merged: Dict[str, Any] = {}
+        for i, fixture_json in enumerate(fixtures):
+            resolved = self._resolve_fixture_json_data(fixture_json)
+            if not isinstance(resolved, dict):
+                raise TypeError(
+                    f"http_client_params.fixture[{i}] doit produire un dict, "
+                    f"reçu {type(resolved).__name__}."
+                )
+            merged.update(resolved)
+        return merged
 
     def _serialize_json_body(self, data: Any, http_params: HTTPClientParams) -> Any:
         http_params.setdefault("content_type", "application/json")
@@ -334,8 +369,13 @@ class ForgeCase(TestCase):
             if raw_user := test.get("user"):
                 self.user = self._resolve_value("test.user", raw_user)
 
+            # fixtures du test (une ou plusieurs)
             if fixture := test.get("fixture"):
-                self._resolve_fixture_instance(fixture)
+                self._resolve_fixtures(fixture)
+
+            # pre_test du scénario — exécuté avant la requête
+            if pre_test := scenario.get("pre_test"):
+                pre_test(self)
 
             self.client = self._resolve_client(scenario.get("authenticated", False))
             url = self._resolve_url(test, scenario.get("reverse_params"))

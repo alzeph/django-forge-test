@@ -51,7 +51,7 @@ class FixtureJson(TypedDict, total=False):
 
 
 class HTTPClientParams(TypedDict, total=False):
-    fixture: FixtureJson
+    fixture: Union[FixtureJson, List[FixtureJson]]  # unique ou liste fusionnée dans l'ordre
     content_type: str
     follow: bool
     secure: bool
@@ -74,12 +74,13 @@ class ResponseValidationParams(TypedDict, total=False):
     Plusieurs scénarios peuvent partager le même status code via une liste
     — voir TestCaseConfig.expected_responses.
     """
+    pre_test: Callable[[Any], None]              # exécuté avant la requête : lambda t: t.obj.delete()
     reverse_params: ReverseParams
     http_client_params: HTTPClientParams
     authenticated: bool
     expected_response: Type[Any]
     expected_fields: List[str]
-    expected_value_of_fields: Dict[str, LazyValue]  # ex: {"owner_id": lambda t: t.user.pk}
+    expected_value_of_fields: Dict[str, LazyValue]
     expected_type_of_fields: Dict[str, Type[Any]]
     forbidden_fields: List[str]
 
@@ -90,18 +91,18 @@ ExpectedResponseEntry = Union[ResponseValidationParams, List[ResponseValidationP
 
 
 class TestCaseConfig(TypedDict, total=False):
-    user: Optional[LazyValue]               # ex: lambda t: t.company.owner
+    user: Optional[LazyValue]
     test_name: str
     path_name: str
     method: HttpMethod
     reverse_params: ReverseParams
     http_client_params: HTTPClientParams
-    fixture: Fixture
+    fixture: Union[Fixture, List[Fixture]]        # une fixture ou plusieurs dans l'ordre
     expected_responses: Dict[int, ExpectedResponseEntry]
 
 
 class ConfigForgeCase(TypedDict, total=False):
-    user: Optional[LazyValue]               
-    auth_backend: Optional[Callable[[Any], Any]]
+    user: Optional[LazyValue]               # ex: lambda t: t.admin_user
+    auth_backend: Optional[Callable[[Any], Any]]  # ex: lambda user: jwt_client(user)
     factory_params: Optional[ForgeModelFactoryParams]
     tests: Optional[List[TestCaseConfig]]
