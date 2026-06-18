@@ -149,6 +149,26 @@ class ForgeCase(TestCase):
     # ------------------------------------------------------------------
 
     def _build_authenticated_client(self) -> Client:
+        """
+        Retourne un Client authentifié pour self.user.
+
+        Deux façons de personnaliser selon le mécanisme d'auth du projet :
+
+        1. Via config (recommandé) :
+               config = {
+                   "auth_backend": lambda user: my_jwt_client(user),
+               }
+
+        2. Via override de méthode dans la sous-classe :
+               def _build_authenticated_client(self):
+                   client = Client()
+                   token = RefreshToken.for_user(self.user)
+                   client.defaults["HTTP_AUTHORIZATION"] = f"Bearer {token.access_token}"
+                   return client
+        """
+        auth_backend = self.config.get("auth_backend")
+        if auth_backend is not None:
+            return auth_backend(self.user)
         return login_user_for_test(self.user)
 
     def _build_anonymous_client(self) -> Client:

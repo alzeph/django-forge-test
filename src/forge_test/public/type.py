@@ -102,5 +102,6 @@ class TestCaseConfig(TypedDict, total=False):
 
 class ConfigForgeCase(TypedDict, total=False):
     user: Optional[LazyValue]               # ex: lambda t: t.admin_user
+    auth_backend: Optional[Callable[[Any], Any]]  # ex: lambda user: jwt_client(user)
     factory_params: Optional[ForgeModelFactoryParams]
     tests: Optional[List[TestCaseConfig]]
