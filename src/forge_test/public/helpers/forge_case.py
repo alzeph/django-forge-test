@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json as _json
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from django.contrib.auth import get_user_model
 from django.test import Client, TestCase
@@ -25,36 +25,17 @@ class ForgeCase(TestCase):
     """
     Classe de base pour les tests d'endpoints auto-générés.
 
-    Chaque status code attendu dans `expected_responses` peut contenir un ou
-    plusieurs scénarios (dict ou liste de dicts). Chaque scénario déclenche
-    une requête indépendante avec son propre `authenticated`, `reverse_params`,
-    `http_client_params`, etc.
+    Partout où une valeur est attendue dans la config, une lambda
+    ``lambda t: ...`` peut être utilisée à la place — elle est appelée
+    au moment de l'exécution du test avec l'instance du TestCase en argument.
 
-    Pour référencer une fixture créée plus tôt dans une URL (reverse_params.kwargs),
-    utiliser une lambda plutôt qu'une string magique — validée par l'IDE/mypy :
-
-        "reverse_params": {"kwargs": {"pk": lambda t: t.user.pk}}
-
-    Usage :
-        class MyTests(ForgeCase):
-            config: ConfigForgeCase = {
-                "factory_params": {...},
-                "tests": [
-                    {
-                        "path_name": "api:resource-detail",
-                        "method": "GET",
-                        "fixture": {"model": MyModel, "object_name": "obj"},
-                        "reverse_params": {"kwargs": {"pk": lambda t: t.obj.pk}},
-                        "expected_responses": {
-                            200: {"authenticated": True, "expected_fields": ["id"]},
-                            404: [
-                                {"authenticated": True, "reverse_params": {"kwargs": {"pk": 999999}}},
-                                {"authenticated": False},
-                            ],
-                        },
-                    }
-                ],
-            }
+    Cela s'applique à :
+        - fixture.kwargs        : {"owner": lambda t: t.user}
+        - fixture.data          : {"name": lambda t: t.company.name}
+        - reverse_params.kwargs : {"pk": lambda t: t.obj.pk}
+        - FixtureJson.data      : {"email": lambda t: t.user.email}
+        - expected_value_of_fields : {"owner_id": lambda t: t.user.pk}
+        - config.user / test.user  : lambda t: t.company.owner
     """
 
     config: ConfigForgeCase
@@ -79,12 +60,46 @@ class ForgeCase(TestCase):
     def setUp(self) -> None:
         super().setUp()
         self.factory = self._build_factory()
-        self.user = self.config.get("user") or self.factory.create(User)
+        user = self.config.get("user")
+        self.user = self._resolve_value("config.user", user) if user else self.factory.create(User)
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         cls._validate_config()
         cls._attach_all_tests()
+
+    # ------------------------------------------------------------------
+    # Résolution universelle des lambdas
+    # ------------------------------------------------------------------
+
+    def _resolve_value(self, context: str, value: Any) -> Any:
+        """
+        Résout une valeur potentiellement lambda.
+
+        Seules les fonctions (lambda, def) sont résolues.
+        Les objets qui sont callable par accident (MagicMock, classes, etc.)
+        sont retournés tels quels.
+
+        Args:
+            context: chemin lisible vers la valeur (ex: "fixture.kwargs['pk']")
+                     — utilisé dans le message d'erreur uniquement.
+            value:   valeur brute ou lambda ``lambda t: ...``.
+        """
+        import types
+        if not isinstance(value, (types.FunctionType, types.MethodType, types.LambdaType)):
+            return value
+        try:
+            return value(self)
+        except AttributeError as e:
+            raise AttributeError(
+                f"{context} : la lambda a levé une AttributeError : {e}. "
+                "Vérifiez que l'objet référencé est bien disponible sur self "
+                "(créé via object_name dans une fixture précédente, ou défini dans setUp)."
+            ) from e
+
+    def _resolve_dict_values(self, context: str, d: Dict[str, Any]) -> Dict[str, Any]:
+        """Résout toutes les valeurs d'un dict via _resolve_value."""
+        return {key: self._resolve_value(f"{context}['{key}']", val) for key, val in d.items()}
 
     # ------------------------------------------------------------------
     # Validation de la config
@@ -150,6 +165,7 @@ class ForgeCase(TestCase):
         """
         Résout l'URL en fusionnant les reverse_params du test (niveau global)
         avec ceux du scénario courant (priorité au scénario).
+        Les valeurs de kwargs peuvent être des lambdas.
         """
         base_reverse = dict(test.get("reverse_params") or {})
         if scenario_reverse_params:
@@ -157,45 +173,49 @@ class ForgeCase(TestCase):
 
         query = base_reverse.pop("query", None)
         kwargs = base_reverse.pop("kwargs", {}) or {}
-        base_reverse["kwargs"] = self._resolve_kwargs(kwargs)
+        base_reverse["kwargs"] = self._resolve_dict_values("reverse_params.kwargs", kwargs)
 
         url = reverse(test["path_name"], **base_reverse)
         if query:
             url = _append_query_string(url, query)
         return url
 
-    def _resolve_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        """Appelle les valeurs callables (lambdas) avec self, laisse les autres telles quelles."""
-        return {key: self._resolve_kwarg_value(key, value) for key, value in kwargs.items()}
-
-    def _resolve_kwarg_value(self, key: str, value: Any) -> Any:
-        if not callable(value):
-            return value
-        try:
-            return value(self)
-        except AttributeError as e:
-            raise AttributeError(
-                f"reverse_params.kwargs['{key}'] : la lambda a levé une AttributeError : {e}. "
-                "Vérifiez que l'objet référencé existe bien (object_name correct dans fixture)."
-            ) from e
-
     # ------------------------------------------------------------------
     # Fixture data
     # ------------------------------------------------------------------
 
     def _resolve_fixture_json_data(self, fixture_json: FixtureJson) -> Dict[str, Any]:
-        if fixture_json.get("data"):
-            return fixture_json["data"]
+        """
+        Retourne un dict de données pour le body de la requête.
+        Si data est un dict, ses valeurs sont résolues (lambdas comprises).
+        """
+        raw_data = fixture_json.get("data")
+        if raw_data is not None:
+            if isinstance(raw_data, dict):
+                return self._resolve_dict_values("fixture_json.data", raw_data)
+            return self._resolve_value("fixture_json.data", raw_data)
         return self.factory.generate_fields_dict(
             model=fixture_json["model"],
             fields=fixture_json.get("fields"),
         )
 
     def _resolve_fixture_instance(self, fixture: Fixture) -> Any:
-        """Crée ou retourne une instance, la stocke sous self.<object_name>."""
-        instance = fixture.get("data") or self.factory.create(
-            fixture["model"], **(fixture.get("kwargs") or {})
-        )
+        """
+        Crée ou retourne une instance de modèle, la stocke sous self.<object_name>.
+        Les valeurs de fixture.kwargs et fixture.data peuvent être des lambdas.
+        """
+        raw_data = fixture.get("data")
+        if raw_data is not None:
+            instance = (
+                self._resolve_dict_values("fixture.data", raw_data)
+                if isinstance(raw_data, dict)
+                else self._resolve_value("fixture.data", raw_data)
+            )
+        else:
+            resolved_kwargs = self._resolve_dict_values(
+                "fixture.kwargs", fixture.get("kwargs") or {}
+            )
+            instance = self.factory.create(fixture["model"], **resolved_kwargs)
         setattr(self, fixture["object_name"], instance)
         return instance
 
@@ -240,7 +260,9 @@ class ForgeCase(TestCase):
             self.assertIsNot(value, missing, msg=f"Champ attendu '{field}' absent de la réponse.")
 
     def _assert_field_values(self, data: Union[Dict, List], expected_values: Dict[str, Any]) -> None:
-        for field, expected in expected_values.items():
+        """Les valeurs de expected_value_of_fields peuvent être des lambdas."""
+        for field, raw_expected in expected_values.items():
+            expected = self._resolve_value(f"expected_value_of_fields['{field}']", raw_expected)
             actual = _resolve_nested_field(data, field)
             self.assertEqual(actual, expected, msg=f"Champ '{field}': attendu {expected!r}, reçu {actual!r}.")
 
@@ -288,8 +310,9 @@ class ForgeCase(TestCase):
         """Retourne une fonction de test pour un (test, scénario, status_code) donné."""
 
         def test_func(self: ForgeCase) -> None:
-            if user := test.get("user"):
-                self.user = user
+            # user override au niveau du test (peut être une lambda)
+            if raw_user := test.get("user"):
+                self.user = self._resolve_value("test.user", raw_user)
 
             if fixture := test.get("fixture"):
                 self._resolve_fixture_instance(fixture)

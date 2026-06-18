@@ -12,10 +12,13 @@ User = get_user_model()
 HttpMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
 _RequestData = Union[Mapping[str, Any], str, Sequence[Tuple[str, Any]], QueryDict]
 
-# Une valeur de kwargs peut être littérale, ou une lambda résolue au runtime
-# avec l'instance du TestCase en argument (ex: lambda t: t.user.pk).
-# Préférer la lambda à une string magique : validée par l'IDE/mypy, pas de typo possible.
-KwargValue = Union[Any, "Callable[[Any], Any]"]
+# Toute valeur dans la config peut être :
+#   - une valeur littérale   : "active", 42, True, {"name": "Alice"}
+#   - une lambda             : lambda t: t.user.pk
+# La lambda reçoit l'instance du TestCase (t) et est résolue au moment de
+# l'exécution du test. C'est valide partout : fixture.kwargs, fixture.data,
+# FixtureJson.data, reverse_params.kwargs, expected_value_of_fields, user.
+LazyValue = Union[Any, Callable[[Any], Any]]
 
 
 class ForgeModelFactoryParams(TypedDict, total=False):
@@ -34,16 +37,17 @@ class ForgeModelFactoryParams(TypedDict, total=False):
 class ReverseParams(TypedDict, total=False):
     urlconf: Optional[str]
     args: Optional[Sequence[Any]]
-    kwargs: Optional[Dict[str, KwargValue]]
+    kwargs: Optional[Dict[str, LazyValue]]   # ex: {"pk": lambda t: t.obj.pk}
     current_app: Optional[str]
     query: Optional[Union[Dict[str, Any], QueryDict]]
     fragment: Optional[str]
 
 
 class FixtureJson(TypedDict, total=False):
+    """Body d'une requête HTTP généré ou fourni directement."""
     model: Type[models.Model]
     fields: Optional[List[str]]
-    data: Optional[Dict[str, Any]]
+    data: Optional[Dict[str, LazyValue]]     # ex: {"email": lambda t: t.user.email}
 
 
 class HTTPClientParams(TypedDict, total=False):
@@ -56,37 +60,37 @@ class HTTPClientParams(TypedDict, total=False):
 
 
 class Fixture(TypedDict, total=False):
-    object_name: str  # requis en pratique — validé au runtime par ForgeCase
+    """Instance de modèle créée avant la requête et stockée sur self.<object_name>."""
+    object_name: str                          # requis — validé au chargement de la classe
     model: Type[models.Model]
-    kwargs: Dict[str, Any]
-    data: Any
+    kwargs: Dict[str, LazyValue]             # ex: {"owner": lambda t: t.user}
+    data: LazyValue                          # instance existante ou lambda retournant une instance
 
 
 class ResponseValidationParams(TypedDict, total=False):
     """
-    Décrit un scénario de test pour un status code donné.
+    Décrit un scénario pour un status code donné.
 
-    Plusieurs scénarios peuvent partager le même status code en les
-    regroupant dans une liste — voir TestCaseConfig.expected_responses.
+    Plusieurs scénarios peuvent partager le même status code via une liste
+    — voir TestCaseConfig.expected_responses.
     """
     reverse_params: ReverseParams
     http_client_params: HTTPClientParams
     authenticated: bool
     expected_response: Type[Any]
     expected_fields: List[str]
-    expected_value_of_fields: Dict[str, Any]
+    expected_value_of_fields: Dict[str, LazyValue]  # ex: {"owner_id": lambda t: t.user.pk}
     expected_type_of_fields: Dict[str, Type[Any]]
     forbidden_fields: List[str]
 
 
 # Pour un même status code : un seul scénario, OU plusieurs scénarios
-# couvrant des chemins différents menant au même code (ex: 404 par mauvais pk
-# et 404 par ressource supprimée).
+# couvrant des chemins différents menant au même code.
 ExpectedResponseEntry = Union[ResponseValidationParams, List[ResponseValidationParams]]
 
 
 class TestCaseConfig(TypedDict, total=False):
-    user: Optional[User]
+    user: Optional[LazyValue]               # ex: lambda t: t.company.owner
     test_name: str
     path_name: str
     method: HttpMethod
@@ -97,6 +101,6 @@ class TestCaseConfig(TypedDict, total=False):
 
 
 class ConfigForgeCase(TypedDict, total=False):
-    user: Optional[User]
+    user: Optional[LazyValue]               # ex: lambda t: t.admin_user
     factory_params: Optional[ForgeModelFactoryParams]
     tests: Optional[List[TestCaseConfig]]
