@@ -46,7 +46,7 @@ class ForgeModelFactory:
 
     def __init__(
         self,
-        max_depth: int = 5,
+        max_depth: int = 10,
         create_m2m: bool = True,
         m2m_count: int = 2,
         max_retries: int = 3,
